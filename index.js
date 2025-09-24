@@ -20,7 +20,7 @@ function createClient(sessionName) {
     const client = new Client({
         authStrategy: new LocalAuth({ clientId: sessionName }),
         puppeteer: {
-            headless: false, // show browser so QR is visible
+            headless: true, // show browser so QR is visible
             args: ['--no-sandbox', '--disable-setuid-sandbox']
         }
     });
