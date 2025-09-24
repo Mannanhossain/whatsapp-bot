@@ -11,16 +11,25 @@ app.use(cors());
 app.use(bodyParser.json());
 
 let clients = {};
-let qrCodes = {}; // Store QR codes (Base64) for frontend
+let qrCodes = {};
+
+// Directory for persistent sessions on Railway
+const SESSION_DIR = path.join('/data', '.wwebjs_auth');
+
+// Make sure folder exists
+if (!fs.existsSync(SESSION_DIR)) fs.mkdirSync(SESSION_DIR, { recursive: true });
 
 // -------------------- Create Client --------------------
 function createClient(sessionName) {
     if (clients[sessionName] && clients[sessionName].initialized) return clients[sessionName];
 
     const client = new Client({
-        authStrategy: new LocalAuth({ clientId: sessionName }),
+        authStrategy: new LocalAuth({ 
+            clientId: sessionName, 
+            dataPath: SESSION_DIR // store session persistently
+        }),
         puppeteer: {
-            headless: true, // show browser so QR is visible
+            headless: true,
             args: ['--no-sandbox', '--disable-setuid-sandbox']
         }
     });
@@ -29,8 +38,6 @@ function createClient(sessionName) {
 
     client.on('qr', async (qr) => {
         console.log(`QR for ${sessionName}:`, qr);
-
-        // Convert QR to Base64 for API/Flutter
         const qrImage = await QRCode.toDataURL(qr);
         qrCodes[sessionName] = qrImage;
     });
@@ -122,7 +129,7 @@ app.delete('/session/:sessionName', async (req, res) => {
         delete clients[sessionName];
         delete qrCodes[sessionName];
 
-        const sessionPath = path.join('.wwebjs_auth', sessionName);
+        const sessionPath = path.join(SESSION_DIR, sessionName);
         if (fs.existsSync(sessionPath)) fs.rmSync(sessionPath, { recursive: true, force: true });
     }
 
@@ -134,5 +141,4 @@ app.get('/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().
 
 // -------------------- Start Server --------------------
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => console.log(` WhatsApp API Server running on port ${PORT}`));
-
+app.listen(PORT, '0.0.0.0', () => console.log(`WhatsApp API Server running on port ${PORT}`));
