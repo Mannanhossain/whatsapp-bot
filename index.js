@@ -142,7 +142,6 @@
 // // -------------------- Start Server --------------------
 // const PORT = process.env.PORT || 3000;
 // app.listen(PORT, '0.0.0.0', () => console.log(`WhatsApp API Server running on port ${PORT}`));
-
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const express = require('express');
 const cors = require('cors');
@@ -158,17 +157,25 @@ app.use(bodyParser.json());
 let clients = {};
 let qrCodes = {};
 
-// Session folder inside project (writable)
+// -------------------- Session folder --------------------
 const SESSION_DIR = path.join(__dirname, '.wwebjs_auth');
 if (!fs.existsSync(SESSION_DIR)) fs.mkdirSync(SESSION_DIR, { recursive: true });
 
+// -------------------- Helper: sanitize session name --------------------
+function sanitizeSessionName(name) {
+    if (!name) return 'default';
+    return name.replace(/[^a-zA-Z0-9_-]/g, '');
+}
+
 // -------------------- Create Client --------------------
 function createClient(sessionName) {
+    sessionName = sanitizeSessionName(sessionName);
+
     if (clients[sessionName] && clients[sessionName].initialized) return clients[sessionName];
 
     const client = new Client({
         authStrategy: new LocalAuth({ 
-            clientId: sessionName, 
+            clientId: sessionName,
             dataPath: SESSION_DIR
         }),
         puppeteer: {
@@ -181,8 +188,12 @@ function createClient(sessionName) {
 
     client.on('qr', async (qr) => {
         console.log(`QR for ${sessionName}:`, qr);
-        const qrImage = await QRCode.toDataURL(qr);
-        qrCodes[sessionName] = qrImage;
+        try {
+            const qrImage = await QRCode.toDataURL(qr);
+            qrCodes[sessionName] = qrImage;
+        } catch (err) {
+            console.error('QR code generation error:', err);
+        }
     });
 
     client.on('ready', () => {
@@ -212,7 +223,8 @@ function createClient(sessionName) {
 
 // -------------------- QR API --------------------
 app.get('/qr/:sessionName', (req, res) => {
-    const { sessionName } = req.params;
+    const rawName = req.params.sessionName;
+    const sessionName = sanitizeSessionName(rawName);
 
     if (!qrCodes[sessionName]) {
         createClient(sessionName);
@@ -227,7 +239,10 @@ app.get('/qr/:sessionName', (req, res) => {
 
 // -------------------- Send Message API --------------------
 app.post('/send', async (req, res) => {
-    const { sessionName, phone, message } = req.body;
+    let { sessionName, phone, message } = req.body;
+
+    sessionName = sanitizeSessionName(sessionName);
+
     if (!sessionName || !phone || !message) return res.status(400).json({ success: false, error: 'Missing parameters' });
 
     if (!clients[sessionName]) {
@@ -237,6 +252,7 @@ app.post('/send', async (req, res) => {
 
     try {
         const client = clients[sessionName];
+
         if (!client.info || !client.info.wid) return res.status(425).json({ success: false, error: 'Session not ready', qrUrl: `/qr/${sessionName}` });
 
         const chatId = phone.includes('@c.us') ? phone : `${phone}@c.us`;
@@ -253,7 +269,8 @@ app.post('/send', async (req, res) => {
 
 // -------------------- Session Status --------------------
 app.get('/status/:sessionName', (req, res) => {
-    const { sessionName } = req.params;
+    const rawName = req.params.sessionName;
+    const sessionName = sanitizeSessionName(rawName);
     const client = clients[sessionName];
 
     if (!client) return res.json({ status: 'not_initialized', message: 'Session not initialized' });
@@ -264,7 +281,8 @@ app.get('/status/:sessionName', (req, res) => {
 
 // -------------------- Logout --------------------
 app.delete('/session/:sessionName', async (req, res) => {
-    const { sessionName } = req.params;
+    const rawName = req.params.sessionName;
+    const sessionName = sanitizeSessionName(rawName);
     const client = clients[sessionName];
 
     if (client) {
@@ -285,4 +303,3 @@ app.get('/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().
 // -------------------- Start Server --------------------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => console.log(`WhatsApp API Server running on port ${PORT}`));
-
