@@ -1,3 +1,141 @@
+// const { Client, LocalAuth } = require('whatsapp-web.js');
+// const express = require('express');
+// const cors = require('cors');
+// const bodyParser = require('body-parser');
+// const fs = require('fs');
+// const path = require('path');
+// const QRCode = require('qrcode');
+
+// const app = express();
+// app.use(cors());
+// app.use(bodyParser.json());
+
+// let clients = {};
+// let qrCodes = {}; // Store QR codes (Base64) for frontend
+
+// // -------------------- Create Client --------------------
+// function createClient(sessionName) {
+//     if (clients[sessionName] && clients[sessionName].initialized) return clients[sessionName];
+
+//     const client = new Client({
+//         authStrategy: new LocalAuth({ clientId: sessionName }),
+//         puppeteer: {
+//             headless: false, // show browser so QR is visible
+//             args: ['--no-sandbox', '--disable-setuid-sandbox']
+//         }
+//     });
+
+//     qrCodes[sessionName] = null;
+
+//     client.on('qr', async (qr) => {
+//         console.log(`QR for ${sessionName}:`, qr);
+
+//         // Convert QR to Base64 for API/Flutter
+//         const qrImage = await QRCode.toDataURL(qr);
+//         qrCodes[sessionName] = qrImage;
+//     });
+
+//     client.on('ready', () => {
+//         console.log(`${sessionName} ready!`);
+//         qrCodes[sessionName] = 'READY';
+//     });
+
+//     client.on('authenticated', () => console.log(`${sessionName} authenticated!`));
+
+//     client.on('auth_failure', () => {
+//         console.log(`${sessionName} authentication failed!`);
+//         qrCodes[sessionName] = 'AUTH_FAILED';
+//     });
+
+//     client.on('disconnected', (reason) => {
+//         console.log(`${sessionName} disconnected:`, reason);
+//         delete clients[sessionName];
+//         delete qrCodes[sessionName];
+//     });
+
+//     client.initialize();
+//     client.initialized = true;
+//     clients[sessionName] = client;
+
+//     return client;
+// }
+
+// // -------------------- QR API --------------------
+// app.get('/qr/:sessionName', (req, res) => {
+//     const { sessionName } = req.params;
+
+//     if (!qrCodes[sessionName]) {
+//         createClient(sessionName);
+//         return res.status(202).json({ status: 'generating', message: 'QR code being generated' });
+//     }
+
+//     if (qrCodes[sessionName] === 'READY') return res.json({ status: 'ready', message: 'Session is ready' });
+//     if (qrCodes[sessionName] === 'AUTH_FAILED') return res.status(401).json({ status: 'auth_failed', message: 'Authentication failed' });
+
+//     res.json({ status: 'qr_required', qr: qrCodes[sessionName], message: 'Scan QR code to continue' });
+// });
+
+// // -------------------- Send Message API --------------------
+// app.post('/send', async (req, res) => {
+//     const { sessionName, phone, message } = req.body;
+//     if (!sessionName || !phone || !message) return res.status(400).json({ success: false, error: 'Missing parameters' });
+
+//     if (!clients[sessionName]) {
+//         createClient(sessionName);
+//         return res.status(425).json({ success: false, error: 'Session not ready', qrUrl: `/qr/${sessionName}` });
+//     }
+
+//     try {
+//         const client = clients[sessionName];
+//         if (!client.info || !client.info.wid) return res.status(425).json({ success: false, error: 'Session not ready', qrUrl: `/qr/${sessionName}` });
+
+//         const chatId = phone.includes('@c.us') ? phone : `${phone}@c.us`;
+//         if (!chatId.match(/^\d+@c\.us$/)) return res.status(400).json({ success: false, error: 'Invalid phone number format' });
+
+//         const sendResult = await client.sendMessage(chatId, message);
+//         res.json({ success: true, messageId: sendResult.id._serialized, timestamp: sendResult.timestamp, message: 'Message sent successfully' });
+
+//     } catch (err) {
+//         console.error('Send message error:', err);
+//         res.status(500).json({ success: false, error: 'Failed to send message: ' + err.message });
+//     }
+// });
+
+// // -------------------- Session Status --------------------
+// app.get('/status/:sessionName', (req, res) => {
+//     const { sessionName } = req.params;
+//     const client = clients[sessionName];
+
+//     if (!client) return res.json({ status: 'not_initialized', message: 'Session not initialized' });
+//     if (client.info && client.info.wid) return res.json({ status: 'ready', message: 'Session is ready' });
+
+//     res.json({ status: 'authenticating', message: 'Waiting for authentication' });
+// });
+
+// // -------------------- Logout --------------------
+// app.delete('/session/:sessionName', async (req, res) => {
+//     const { sessionName } = req.params;
+//     const client = clients[sessionName];
+
+//     if (client) {
+//         try { await client.logout(); await client.destroy(); } catch (err) { console.error(err); }
+//         delete clients[sessionName];
+//         delete qrCodes[sessionName];
+
+//         const sessionPath = path.join('.wwebjs_auth', sessionName);
+//         if (fs.existsSync(sessionPath)) fs.rmSync(sessionPath, { recursive: true, force: true });
+//     }
+
+//     res.json({ success: true, message: 'Session cleared' });
+// });
+
+// // -------------------- Health --------------------
+// app.get('/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString(), activeSessions: Object.keys(clients).length }));
+
+// // -------------------- Start Server --------------------
+// const PORT = process.env.PORT || 3000;
+// app.listen(PORT, '0.0.0.0', () => console.log(` WhatsApp API Server running on port ${PORT}`));
+
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const express = require('express');
 const cors = require('cors');
@@ -11,28 +149,61 @@ app.use(cors());
 app.use(bodyParser.json());
 
 let clients = {};
-let qrCodes = {}; // Store QR codes (Base64) for frontend
+let qrCodes = {};
 
-// -------------------- Create Client --------------------
+// Process error handling
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (error) => {
+    console.error('Uncaught Exception:', error);
+    process.exit(1);
+});
+
+// Graceful shutdown
+process.on('SIGINT', () => {
+    console.log('Received SIGINT. Shutting down gracefully...');
+    Object.values(clients).forEach(client => client.destroy());
+    process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+    console.log('Received SIGTERM. Shutting down gracefully...');
+    Object.values(clients).forEach(client => client.destroy());
+    process.exit(0);
+});
+
 function createClient(sessionName) {
     if (clients[sessionName] && clients[sessionName].initialized) return clients[sessionName];
 
     const client = new Client({
         authStrategy: new LocalAuth({ clientId: sessionName }),
         puppeteer: {
-            headless: false, // show browser so QR is visible
-            args: ['--no-sandbox', '--disable-setuid-sandbox']
+            headless: true, // FIXED: Must be true for Railway
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-accelerated-2d-canvas',
+                '--no-first-run',
+                '--no-zygote',
+                '--single-process',
+                '--disable-gpu'
+            ]
         }
     });
 
     qrCodes[sessionName] = null;
 
     client.on('qr', async (qr) => {
-        console.log(`QR for ${sessionName}:`, qr);
-
-        // Convert QR to Base64 for API/Flutter
-        const qrImage = await QRCode.toDataURL(qr);
-        qrCodes[sessionName] = qrImage;
+        console.log(`QR for ${sessionName} received`);
+        try {
+            const qrImage = await QRCode.toDataURL(qr);
+            qrCodes[sessionName] = qrImage;
+        } catch (error) {
+            console.error('QR generation error:', error);
+        }
     });
 
     client.on('ready', () => {
@@ -42,8 +213,8 @@ function createClient(sessionName) {
 
     client.on('authenticated', () => console.log(`${sessionName} authenticated!`));
 
-    client.on('auth_failure', () => {
-        console.log(`${sessionName} authentication failed!`);
+    client.on('auth_failure', (msg) => {
+        console.log(`${sessionName} authentication failed:`, msg);
         qrCodes[sessionName] = 'AUTH_FAILED';
     });
 
@@ -60,79 +231,7 @@ function createClient(sessionName) {
     return client;
 }
 
-// -------------------- QR API --------------------
-app.get('/qr/:sessionName', (req, res) => {
-    const { sessionName } = req.params;
+// ... rest of your endpoints remain similar but use the improved error handling
 
-    if (!qrCodes[sessionName]) {
-        createClient(sessionName);
-        return res.status(202).json({ status: 'generating', message: 'QR code being generated' });
-    }
-
-    if (qrCodes[sessionName] === 'READY') return res.json({ status: 'ready', message: 'Session is ready' });
-    if (qrCodes[sessionName] === 'AUTH_FAILED') return res.status(401).json({ status: 'auth_failed', message: 'Authentication failed' });
-
-    res.json({ status: 'qr_required', qr: qrCodes[sessionName], message: 'Scan QR code to continue' });
-});
-
-// -------------------- Send Message API --------------------
-app.post('/send', async (req, res) => {
-    const { sessionName, phone, message } = req.body;
-    if (!sessionName || !phone || !message) return res.status(400).json({ success: false, error: 'Missing parameters' });
-
-    if (!clients[sessionName]) {
-        createClient(sessionName);
-        return res.status(425).json({ success: false, error: 'Session not ready', qrUrl: `/qr/${sessionName}` });
-    }
-
-    try {
-        const client = clients[sessionName];
-        if (!client.info || !client.info.wid) return res.status(425).json({ success: false, error: 'Session not ready', qrUrl: `/qr/${sessionName}` });
-
-        const chatId = phone.includes('@c.us') ? phone : `${phone}@c.us`;
-        if (!chatId.match(/^\d+@c\.us$/)) return res.status(400).json({ success: false, error: 'Invalid phone number format' });
-
-        const sendResult = await client.sendMessage(chatId, message);
-        res.json({ success: true, messageId: sendResult.id._serialized, timestamp: sendResult.timestamp, message: 'Message sent successfully' });
-
-    } catch (err) {
-        console.error('Send message error:', err);
-        res.status(500).json({ success: false, error: 'Failed to send message: ' + err.message });
-    }
-});
-
-// -------------------- Session Status --------------------
-app.get('/status/:sessionName', (req, res) => {
-    const { sessionName } = req.params;
-    const client = clients[sessionName];
-
-    if (!client) return res.json({ status: 'not_initialized', message: 'Session not initialized' });
-    if (client.info && client.info.wid) return res.json({ status: 'ready', message: 'Session is ready' });
-
-    res.json({ status: 'authenticating', message: 'Waiting for authentication' });
-});
-
-// -------------------- Logout --------------------
-app.delete('/session/:sessionName', async (req, res) => {
-    const { sessionName } = req.params;
-    const client = clients[sessionName];
-
-    if (client) {
-        try { await client.logout(); await client.destroy(); } catch (err) { console.error(err); }
-        delete clients[sessionName];
-        delete qrCodes[sessionName];
-
-        const sessionPath = path.join('.wwebjs_auth', sessionName);
-        if (fs.existsSync(sessionPath)) fs.rmSync(sessionPath, { recursive: true, force: true });
-    }
-
-    res.json({ success: true, message: 'Session cleared' });
-});
-
-// -------------------- Health --------------------
-app.get('/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString(), activeSessions: Object.keys(clients).length }));
-
-// -------------------- Start Server --------------------
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => console.log(` WhatsApp API Server running on port ${PORT}`));
-
+app.listen(PORT, '0.0.0.0', () => console.log(`WhatsApp API Server running on port ${PORT}`));
