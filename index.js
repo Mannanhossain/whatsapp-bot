@@ -1,10 +1,7 @@
-// server.js
 const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const { Client, LocalAuth } = require('whatsapp-web.js');
-const fs = require('fs');
-const path = require('path');
 
 const app = express();
 app.use(cors());
@@ -29,9 +26,32 @@ function getClient(userId) {
     puppeteer: { headless: true }
   });
 
-  client.on('ready', () => console.log(`WhatsApp client ready for user: ${userId}`));
+  // Track ready status
+  client.isReady = false;
+  client.messageQueue = [];
+
+  client.on('ready', async () => {
+    console.log(`WhatsApp client ready for user: ${userId}`);
+    client.isReady = true;
+
+    // Send any queued messages
+    while (client.messageQueue.length > 0) {
+      const { chatId, message, resolve, reject } = client.messageQueue.shift();
+      try {
+        const msg = await client.sendMessage(chatId, message);
+        resolve(msg);
+      } catch (err) {
+        reject(err);
+      }
+    }
+  });
+
   client.on('auth_failure', () => console.log(`Auth failed for user: ${userId}`));
-  client.on('disconnected', (reason) => console.log(`Client ${userId} disconnected: ${reason}`));
+  client.on('disconnected', (reason) => {
+    console.log(`Client ${userId} disconnected: ${reason}`);
+    client.isReady = false;
+    client.initialize(); // reconnect automatically
+  });
 
   client.initialize();
   clients[userId] = client;
@@ -41,12 +61,17 @@ function getClient(userId) {
 // Get QR code for a user to scan
 app.get('/qr/:userId', async (req, res) => {
   const { userId } = req.params;
-
   const client = getClient(userId);
 
-  client.on('qr', (qr) => {
+  // Use once to prevent multiple responses
+  client.once('qr', (qr) => {
     res.json({ qr });
   });
+
+  // If already ready, no QR needed
+  if (client.isReady) {
+    res.json({ message: "Client already authenticated and ready!" });
+  }
 });
 
 // Send WhatsApp message
@@ -66,19 +91,29 @@ app.post('/send-message', async (req, res) => {
     const client = getClient(userId);
     const chatId = number.includes('@c.us') ? number : `${number}@c.us`;
 
-    // Wait until client is ready
-    if (!client.info || !client.info.wid) {
-      return res.status(400).json({ success: false, message: "Client not ready. Scan QR first." });
+    // If client is ready, send immediately
+    if (client.isReady) {
+      const msg = await client.sendMessage(chatId, message);
+      return res.json({
+        success: true,
+        messageId: msg.id._serialized,
+        timestamp: Math.floor(Date.now() / 1000),
+        message: "Message sent successfully"
+      });
+    } else {
+      // Queue message until client is ready
+      const msgPromise = new Promise((resolve, reject) => {
+        client.messageQueue.push({ chatId, message, resolve, reject });
+      });
+
+      const msg = await msgPromise;
+      return res.json({
+        success: true,
+        messageId: msg.id._serialized,
+        timestamp: Math.floor(Date.now() / 1000),
+        message: "Message sent successfully (queued)"
+      });
     }
-
-    const msg = await client.sendMessage(chatId, message);
-
-    return res.json({
-      success: true,
-      messageId: msg.id._serialized,
-      timestamp: Math.floor(Date.now() / 1000),
-      message: "Message sent successfully"
-    });
 
   } catch (error) {
     console.error("Send message error:", error);
