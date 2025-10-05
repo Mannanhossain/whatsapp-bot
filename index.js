@@ -2,9 +2,9 @@ const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
 const { Client, LocalAuth } = require("whatsapp-web.js");
-const fs = require("fs-extra");
-const path = require("path");
 const QRCode = require("qrcode");
+const path = require("path");
+const fs = require("fs-extra");
 
 const app = express();
 app.use(cors());
@@ -12,171 +12,191 @@ app.use(bodyParser.json());
 
 const PORT = process.env.PORT || 3000;
 
-// In-memory storage
+// -----------------------------
+// In-memory storage per user
+// -----------------------------
 let clients = new Map();
 let qrcodes = new Map();
-let clientStatus = new Map();
+let clientStatus = new Map(); // initializing, qr_pending, ready, disconnected
 
-/* ---------------------- Helper: Start WhatsApp Client ---------------------- */
-async function startClient(userId) {
-    if (clients.has(userId)) return clients.get(userId);
+// -----------------------------
+// Start or get WhatsApp client
+// -----------------------------
+function getClient(userId) {
+  // Return existing client if still active
+  if (clients.has(userId) && !["disconnected", "error"].includes(clientStatus.get(userId))) {
+    return clients.get(userId);
+  }
 
-    console.log(`[INFO] Starting WhatsApp client for ${userId}`);
+  console.log(`🔄 Starting WhatsApp client for ${userId}`);
 
-    const client = new Client({
-        authStrategy: new LocalAuth({ clientId: userId }),
-        puppeteer: { 
-            headless: true, 
-            args: ["--no-sandbox", "--disable-setuid-sandbox"] 
-        },
-    });
+  const client = new Client({
+    authStrategy: new LocalAuth({ clientId: userId, dataPath: path.join(__dirname, "sessions", userId) }),
+    puppeteer: {
+      headless: true,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-accelerated-2d-canvas",
+        "--no-first-run",
+        "--no-zygote",
+        "--single-process",
+        "--disable-gpu"
+      ]
+    }
+  });
 
-    clients.set(userId, client);
-    clientStatus.set(userId, "initializing");
+  clientStatus.set(userId, "initializing");
 
-    client.on("qr", async (qr) => {
-        console.log(`[QR] New QR for ${userId}`);
-        try {
-            const qrImage = await QRCode.toDataURL(qr);
-            qrcodes.set(userId, qrImage);
-            clientStatus.set(userId, "qr");
-        } catch (e) {
-            console.error(`[QR ERROR] ${e}`);
-        }
-    });
+  client.on("qr", async (qr) => {
+    console.log(`📲 QR received for ${userId}`);
+    clientStatus.set(userId, "qr_pending");
 
-    client.on("ready", () => {
-        console.log(`[READY] WhatsApp client ready for ${userId}`);
-        clientStatus.set(userId, "ready");
-        qrcodes.delete(userId);
-    });
+    try {
+      const qrImage = await QRCode.toDataURL(qr);
+      qrcodes.set(userId, { qr, image: qrImage, generatedAt: Date.now() });
+    } catch (err) {
+      console.error("QR generation error:", err);
+    }
+  });
 
-    client.on("disconnected", (reason) => {
-        console.log(`[DISCONNECTED] ${userId} - ${reason}`);
-        clientStatus.set(userId, "disconnected");
-        clients.delete(userId);
-    });
+  client.on("ready", () => {
+    console.log(`✅ Client ${userId} ready`);
+    clientStatus.set(userId, "ready");
+    qrcodes.delete(userId);
+  });
 
-    client.on("auth_failure", (msg) => {
-        console.log(`[AUTH FAILURE] ${userId} - ${msg}`);
-        clientStatus.set(userId, "disconnected");
-    });
+  client.on("auth_failure", () => {
+    console.error(`❌ Auth failure for ${userId}`);
+    clientStatus.set(userId, "auth_failure");
+    cleanupClient(userId);
+  });
 
-    await client.initialize();
-    return client;
+  client.on("disconnected", () => {
+    console.log(`⚠️ Client ${userId} disconnected`);
+    clientStatus.set(userId, "disconnected");
+    cleanupClient(userId);
+  });
+
+  client.on("error", (err) => {
+    console.error(`💥 Error for ${userId}:`, err);
+    clientStatus.set(userId, "error");
+  });
+
+  client.initialize();
+  clients.set(userId, client);
+  return client;
 }
 
-/* ---------------------- Routes ---------------------- */
+// -----------------------------
+// Cleanup client
+// -----------------------------
+function cleanupClient(userId) {
+  if (clients.has(userId)) {
+    try { clients.get(userId).destroy(); } catch (err) { console.error(err); }
+  }
+  clients.delete(userId);
+  qrcodes.delete(userId);
+  clientStatus.delete(userId);
+}
 
-// QR Page with auto-refresh
+// -----------------------------
+// Send message safely
+// -----------------------------
+async function safeSendMessage(client, number, message) {
+  const chatId = number.includes("@c.us") ? number : `${number}@c.us`;
+
+  for (let i = 0; i < 3; i++) {
+    try {
+      if (client.info?.wid) {
+        return await client.sendMessage(chatId, message);
+      }
+      await new Promise(r => setTimeout(r, 2000));
+    } catch (err) {
+      console.error(`Send attempt ${i + 1} failed:`, err.message);
+      await new Promise(r => setTimeout(r, 2000));
+    }
+  }
+
+  throw new Error("Failed to send message after 3 retries");
+}
+
+// -----------------------------
+// QR page route
+// -----------------------------
 app.get("/qr/:userId", async (req, res) => {
-    const { userId } = req.params;
+  const { userId } = req.params;
+  getClient(userId);
 
-    if (!clients.has(userId)) {
-        console.log(`[INFO] No client found for ${userId}, starting...`);
-        await startClient(userId);
-    }
+  // Wait a short time for QR to appear
+  let attempts = 0;
+  while (!qrcodes.has(userId) && attempts < 20) {
+    await new Promise(r => setTimeout(r, 500));
+    attempts++;
+  }
 
-    const status = clientStatus.get(userId) || "initializing";
-    const qrImage = qrcodes.get(userId);
-    const isReady = status === "ready";
+  const qrData = qrcodes.get(userId);
+  const status = clientStatus.get(userId) || "initializing";
 
-    console.log(`[STATUS] ${userId} = ${status}`);
+  if (status === "ready") {
+    return res.send(`<h2>✅ WhatsApp Client Ready for ${userId}</h2>`);
+  }
 
-    if (isReady) {
-        return res.send(`
-        <html>
-            <head><title>WhatsApp Ready</title></head>
-            <body style="font-family:sans-serif;text-align:center;margin-top:80px;">
-                <h2>✅ WhatsApp Client Ready</h2>
-                <p>User ID: <b>${userId}</b></p>
-                <p>No QR needed — already connected.</p>
-            </body>
-        </html>
-        `);
-    }
-
-    if (qrImage) {
-        return res.send(`
-        <html>
-            <head>
-                <title>WhatsApp QR</title>
-                <meta http-equiv="refresh" content="5">
-            </head>
-            <body style="font-family:sans-serif;text-align:center;margin-top:50px;">
-                <h2>📱 Scan QR to Connect WhatsApp</h2>
-                <p>User ID: <b>${userId}</b></p>
-                <img src="${qrImage}" style="width:300px;height:300px;"/>
-                <p>Status: ${status}</p>
-                <p>(This page refreshes every 5 seconds until ready)</p>
-            </body>
-        </html>
-        `);
-    } else {
-        return res.send(`
-        <html>
-            <head><meta http-equiv="refresh" content="2"></head>
-            <body style="font-family:sans-serif;text-align:center;margin-top:80px;">
-                <h3>⏳ Generating QR…</h3>
-                <p>Status: ${status}</p>
-            </body>
-        </html>
-        `);
-    }
-});
-
-// Send WhatsApp message
-app.post("/send/:userId", async (req, res) => {
-    const { userId } = req.params;
-    const { number, message } = req.body;
-
-    try {
-        if (!clients.has(userId)) return res.json({ success: false, message: "Client not initialized" });
-
-        const client = clients.get(userId);
-        if (clientStatus.get(userId) !== "ready") return res.json({ success: false, message: "Client not ready. Scan QR first." });
-
-        const chatId = number.includes("@c.us") ? number : `${number}@c.us`;
-        await client.sendMessage(chatId, message);
-        res.json({ success: true, message: `Message sent to ${number}` });
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ success: false, message: err.message });
-    }
-});
-
-// Reset session
-app.post("/reset/:userId", async (req, res) => {
-    const { userId } = req.params;
-    try {
-        console.log(`[RESET] Resetting session for ${userId}`);
-
-        if (clients.has(userId)) {
-            const client = clients.get(userId);
-            await client.destroy();
-            clients.delete(userId);
-            qrcodes.delete(userId);
-            clientStatus.delete(userId);
-        }
-
-        const sessionDir = path.join(__dirname, ".wwebjs_auth", `session-${userId}`);
-        if (fs.existsSync(sessionDir)) await fs.remove(sessionDir);
-
-        res.json({ success: true, message: "Session reset successfully. Scan QR again." });
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ success: false, message: err.message });
-    }
-});
-
-// Default route
-app.get("/", (req, res) => {
-    res.send(`
-        <html><body style="font-family:sans-serif;text-align:center;margin-top:80px;">
-        <h2>🚀 WhatsApp Bot Server Running</h2>
-        <p>Use <code>/qr/{userId}</code> to view QR</p>
-        </body></html>
+  if (qrData) {
+    return res.send(`
+      <h2>📱 QR for ${userId}</h2>
+      <img src="${qrData.image}" width="300"/>
+      <p>Status: ${status} (Page auto-refreshes every 10s)</p>
+      <script>setTimeout(()=>location.reload(),10000)</script>
     `);
+  }
+
+  res.send(`<h2>⏳ Waiting QR for ${userId}...</h2><script>setTimeout(()=>location.reload(),3000)</script>`);
 });
 
-app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
+// -----------------------------
+// Status endpoint
+// -----------------------------
+app.get("/status/:userId", (req, res) => {
+  const { userId } = req.params;
+  const status = clientStatus.get(userId) || "not_found";
+  res.json({ userId, status, hasQR: qrcodes.has(userId), isReady: status === "ready" });
+});
+
+// -----------------------------
+// Send message endpoint
+// -----------------------------
+app.post("/send/:userId", async (req, res) => {
+  const { userId } = req.params;
+  const { number, message } = req.body;
+
+  if (!number || !message) return res.status(400).json({ error: "Number and message required" });
+
+  try {
+    const client = getClient(userId);
+    if (clientStatus.get(userId) !== "ready") return res.status(400).json({ error: "Client not ready", status: clientStatus.get(userId) });
+
+    const sent = await safeSendMessage(client, number, message);
+    res.json({ success: true, messageId: sent.id._serialized, number });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// -----------------------------
+// Root page
+// -----------------------------
+app.get("/", (req, res) => {
+  res.send(`
+    <h1>🚀 WhatsApp Bot Server Running</h1>
+    <p>Use <a href="/qr/user1">/qr/user1</a> to get QR for user1</p>
+    <p>Use /qr/:userId for multiple users (user2, user3, etc.)</p>
+  `);
+});
+
+// -----------------------------
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on http://localhost:${PORT}`);
+});
