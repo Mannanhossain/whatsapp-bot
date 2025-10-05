@@ -25,7 +25,10 @@ async function startClient(userId) {
 
     const client = new Client({
         authStrategy: new LocalAuth({ clientId: userId }),
-        puppeteer: { headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox"] },
+        puppeteer: { 
+            headless: true, 
+            args: ["--no-sandbox", "--disable-setuid-sandbox"] 
+        },
     });
 
     clients.set(userId, client);
@@ -33,9 +36,13 @@ async function startClient(userId) {
 
     client.on("qr", async (qr) => {
         console.log(`[QR] New QR for ${userId}`);
-        const qrImage = await QRCode.toDataURL(qr);
-        qrcodes.set(userId, qrImage);
-        clientStatus.set(userId, "qr");
+        try {
+            const qrImage = await QRCode.toDataURL(qr);
+            qrcodes.set(userId, qrImage);
+            clientStatus.set(userId, "qr");
+        } catch (e) {
+            console.error(`[QR ERROR] ${e}`);
+        }
     });
 
     client.on("ready", () => {
@@ -55,7 +62,7 @@ async function startClient(userId) {
         clientStatus.set(userId, "disconnected");
     });
 
-    client.initialize();
+    await client.initialize();
     return client;
 }
 
@@ -65,11 +72,16 @@ async function startClient(userId) {
 app.get("/qr/:userId", async (req, res) => {
     const { userId } = req.params;
 
-    if (!clients.has(userId)) await startClient(userId);
+    if (!clients.has(userId)) {
+        console.log(`[INFO] No client found for ${userId}, starting...`);
+        await startClient(userId);
+    }
 
     const status = clientStatus.get(userId) || "initializing";
     const qrImage = qrcodes.get(userId);
     const isReady = status === "ready";
+
+    console.log(`[STATUS] ${userId} = ${status}`);
 
     if (isReady) {
         return res.send(`
@@ -105,7 +117,8 @@ app.get("/qr/:userId", async (req, res) => {
         <html>
             <head><meta http-equiv="refresh" content="2"></head>
             <body style="font-family:sans-serif;text-align:center;margin-top:80px;">
-                <h3>⏳ Waiting for QR generation...</h3>
+                <h3>⏳ Generating QR…</h3>
+                <p>Status: ${status}</p>
             </body>
         </html>
         `);
