@@ -1,3 +1,4 @@
+
 const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
@@ -107,21 +108,37 @@ function cleanupClient(userId) {
 async function safeSendMessage(client, number, message) {
   const chatId = number.includes("@c.us") ? number : `${number}@c.us`;
 
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < 5; i++) { // increased retries
     try {
-      if (client.info?.wid) {
-        return await client.sendMessage(chatId, message);
+      // Wait until client info is loaded
+      if (!client.info?.wid) {
+        await new Promise(r => setTimeout(r, 2000));
+        continue;
       }
-      await new Promise(r => setTimeout(r, 2000));
+
+      // Ensure the chat exists
+      let chat;
+      try {
+        chat = await client.getChatById(chatId);
+      } catch (e) {
+        chat = null;
+      }
+
+      if (chat) {
+        await chat.sendMessage(message);
+      } else {
+        await client.sendMessage(chatId, message); // creates chat if not exist
+      }
+
+      return { success: true };
     } catch (err) {
       console.error(`Send attempt ${i + 1} failed:`, err.message);
-      await new Promise(r => setTimeout(r, 2000));
+      await new Promise(r => setTimeout(r, 3000));
     }
   }
 
-  throw new Error("Failed to send message after 3 retries");
+  throw new Error("Failed to send message after 5 retries");
 }
-
 // -----------------------------
 // QR page route
 // -----------------------------
