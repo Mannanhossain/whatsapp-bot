@@ -1,3 +1,7 @@
+// ================================
+// WhatsApp Multi-User Bot Server
+// Stable Version (Oct 2025)
+// ================================
 
 const express = require("express");
 const cors = require("cors");
@@ -24,7 +28,6 @@ let clientStatus = new Map(); // initializing, qr_pending, ready, disconnected
 // Start or get WhatsApp client
 // -----------------------------
 function getClient(userId) {
-  // Return existing client if still active
   if (clients.has(userId) && !["disconnected", "error"].includes(clientStatus.get(userId))) {
     return clients.get(userId);
   }
@@ -32,7 +35,10 @@ function getClient(userId) {
   console.log(`🔄 Starting WhatsApp client for ${userId}`);
 
   const client = new Client({
-    authStrategy: new LocalAuth({ clientId: userId, dataPath: path.join(__dirname, "sessions", userId) }),
+    authStrategy: new LocalAuth({
+      clientId: userId,
+      dataPath: path.join(__dirname, "sessions", userId),
+    }),
     puppeteer: {
       headless: true,
       args: [
@@ -43,13 +49,16 @@ function getClient(userId) {
         "--no-first-run",
         "--no-zygote",
         "--single-process",
-        "--disable-gpu"
-      ]
-    }
+        "--disable-gpu",
+      ],
+    },
   });
 
   clientStatus.set(userId, "initializing");
 
+  // -----------------------------
+  // QR Event
+  // -----------------------------
   client.on("qr", async (qr) => {
     console.log(`📲 QR received for ${userId}`);
     clientStatus.set(userId, "qr_pending");
@@ -62,8 +71,12 @@ function getClient(userId) {
     }
   });
 
-  client.on("ready", () => {
-    console.log(`✅ Client ${userId} ready`);
+  // -----------------------------
+  // Client Ready Event
+  // -----------------------------
+  client.on("ready", async () => {
+    console.log(`✅ Client ${userId} ready, waiting 3s to stabilize...`);
+    await new Promise((r) => setTimeout(r, 3000)); // warm-up delay
     clientStatus.set(userId, "ready");
     qrcodes.delete(userId);
   });
@@ -95,7 +108,11 @@ function getClient(userId) {
 // -----------------------------
 function cleanupClient(userId) {
   if (clients.has(userId)) {
-    try { clients.get(userId).destroy(); } catch (err) { console.error(err); }
+    try {
+      clients.get(userId).destroy();
+    } catch (err) {
+      console.error(err);
+    }
   }
   clients.delete(userId);
   qrcodes.delete(userId);
@@ -103,53 +120,62 @@ function cleanupClient(userId) {
 }
 
 // -----------------------------
-// Send message safely
+// Safe Send Message
 // -----------------------------
 async function safeSendMessage(client, number, message) {
   const chatId = number.includes("@c.us") ? number : `${number}@c.us`;
 
-  for (let i = 0; i < 5; i++) { // increased retries
+  for (let i = 0; i < 5; i++) {
     try {
-      // Wait until client info is loaded
-      if (!client.info?.wid) {
-        await new Promise(r => setTimeout(r, 2000));
+      // ✅ Check client readiness
+      if (!client || !client.info?.wid) {
+        console.log("Client not ready, retrying...");
+        await new Promise((r) => setTimeout(r, 2000));
         continue;
       }
 
-      // Ensure the chat exists
-      let chat;
-      try {
-        chat = await client.getChatById(chatId);
-      } catch (e) {
-        chat = null;
+      // ✅ Check Puppeteer page
+      const isConnected = client.pupPage && !client.pupPage.isClosed();
+      if (!isConnected) {
+        console.log("Puppeteer page lost, reinitializing...");
+        await client.destroy();
+        await client.initialize();
+        await new Promise((r) => setTimeout(r, 3000));
+        continue;
       }
 
-      if (chat) {
-        await chat.sendMessage(message);
-      } else {
-        await client.sendMessage(chatId, message); // creates chat if not exist
-      }
-
-      return { success: true };
+      // ✅ Send message
+      const sentMsg = await client.sendMessage(chatId, message);
+      console.log(`✅ Message sent to ${chatId}`);
+      return { success: true, id: sentMsg.id };
     } catch (err) {
-      console.error(`Send attempt ${i + 1} failed:`, err.message);
-      await new Promise(r => setTimeout(r, 3000));
+      console.error(`Send attempt ${i + 1} failed: ${err.message}`);
+      if (err.message.includes("Evaluation failed")) {
+        console.log("⚠️ WhatsApp context crashed — restarting client...");
+        try {
+          await client.destroy();
+        } catch {}
+        await client.initialize();
+        await new Promise((r) => setTimeout(r, 4000));
+      }
+      await new Promise((r) => setTimeout(r, 2000));
     }
   }
 
   throw new Error("Failed to send message after 5 retries");
 }
+
 // -----------------------------
-// QR page route
+// QR Page Route
 // -----------------------------
 app.get("/qr/:userId", async (req, res) => {
   const { userId } = req.params;
   getClient(userId);
 
-  // Wait a short time for QR to appear
+  // Wait for QR
   let attempts = 0;
   while (!qrcodes.has(userId) && attempts < 20) {
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 500));
     attempts++;
   }
 
@@ -169,11 +195,12 @@ app.get("/qr/:userId", async (req, res) => {
     `);
   }
 
-  res.send(`<h2>⏳ Waiting QR for ${userId}...</h2><script>setTimeout(()=>location.reload(),3000)</script>`);
+  res.send(`<h2>⏳ Waiting for QR for ${userId}...</h2>
+            <script>setTimeout(()=>location.reload(),3000)</script>`);
 });
 
 // -----------------------------
-// Status endpoint
+// Status Endpoint
 // -----------------------------
 app.get("/status/:userId", (req, res) => {
   const { userId } = req.params;
@@ -182,20 +209,31 @@ app.get("/status/:userId", (req, res) => {
 });
 
 // -----------------------------
-// Send message endpoint
+// Send Message Endpoint
 // -----------------------------
 app.post("/send/:userId", async (req, res) => {
   const { userId } = req.params;
   const { number, message } = req.body;
 
-  if (!number || !message) return res.status(400).json({ error: "Number and message required" });
+  if (!number || !message) {
+    return res.status(400).json({ error: "Number and message required" });
+  }
 
   try {
     const client = getClient(userId);
-    if (clientStatus.get(userId) !== "ready") return res.status(400).json({ error: "Client not ready", status: clientStatus.get(userId) });
+    if (clientStatus.get(userId) !== "ready") {
+      return res.status(400).json({
+        error: "Client not ready",
+        status: clientStatus.get(userId),
+      });
+    }
 
     const sent = await safeSendMessage(client, number, message);
-    res.json({ success: true, messageId: sent.id._serialized, number });
+    res.json({
+      success: true,
+      messageId: sent.id._serialized,
+      number,
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
@@ -203,7 +241,7 @@ app.post("/send/:userId", async (req, res) => {
 });
 
 // -----------------------------
-// Root page
+// Root Page
 // -----------------------------
 app.get("/", (req, res) => {
   res.send(`
@@ -211,6 +249,24 @@ app.get("/", (req, res) => {
     <p>Use <a href="/qr/user1">/qr/user1</a> to get QR for user1</p>
     <p>Use /qr/:userId for multiple users (user2, user3, etc.)</p>
   `);
+});
+
+// -----------------------------
+// Global Error Recovery
+// -----------------------------
+process.on("unhandledRejection", async (err) => {
+  if (err.message && err.message.includes("Evaluation failed")) {
+    console.log("⚠️ Global crash detected — restarting all clients...");
+    for (const [userId, client] of clients.entries()) {
+      try {
+        await client.destroy();
+        await client.initialize();
+        console.log(`🔁 Restarted client for ${userId}`);
+      } catch (e) {
+        console.error(`Failed to restart ${userId}:`, e.message);
+      }
+    }
+  }
 });
 
 // -----------------------------
