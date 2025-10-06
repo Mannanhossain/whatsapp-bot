@@ -524,4 +524,4 @@ process.on('SIGINT', () => {
         console.log('✅ Server shutdown complete');
         process.exit(0);
     }, 3000);
-});This is my bot code
+});
