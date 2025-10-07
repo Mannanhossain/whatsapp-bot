@@ -54,7 +54,6 @@ function createClient(userId) {
             remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html'
         }
     });
-okay
     clientStatus.set(userId, "initializing");
 
     client.on("qr", async (qr) => {
